@@ -20,51 +20,78 @@
 DOCUMENTATION = '''
 ---
 module: ec2_ami_search
-short_description: Retrieve AWS AMI information for a given operating system.
+short_description: Searches AWS for matching AMI.
 deprecated: "in favor of the ec2_ami_find module"
 version_added: "1.6"
 description:
   - Look up the most recent AMI on AWS for a given operating system.
   - Returns C(ami), C(aki), C(ari), C(serial), C(tag)
   - If there is no AKI or ARI associated with an image, these will be C(null).
-  - Only supports images from cloud-images.ubuntu.com
-  - 'Example output: C({"ami": "ami-69f5a900", "changed": false, "aki": "aki-88aa75e1", "tag": "release", "ari": null, "serial": "20131024"})'
+  - 'Example output: C({"ami": "ami-69f5a900", "changed": false, "aki":'''
+''' "aki-88aa75e1", "ari": null})'
 version_added: "1.6"
 options:
-  distro:
-    description: Linux distribution (e.g., C(ubuntu))
-    required: true
-    choices: ["ubuntu"]
-  release:
-    description: short name of the release (e.g., C(precise))
-    required: true
-  stream:
-    description: Type of release.
-    required: false
-    default: "server"
-    choices: ["server", "desktop"]
+  name:
+    description: Image name pattern
+    required: False
+    default: None
+  filters:
+    description: Additional filters to pass to AWS (see'''
+''' http://docs.aws.amazon.com/AWSEC2/latest/CommandLineReference'''
+'''/ApiReference-cmd-DescribeImages.html)
+    required: False
+    default: None
+  image_id:
+    description: One or more image IDs to search specifically for.
+    required: False
+    default: None
+  owner:
+    description: One or more owner IDs to filter by. Also accepts 'ubuntu' '''
+'''and 'amazon'.
+    required: False
+    default: None
   store:
     description: Back-end store for instance
-    required: false
-    default: "ebs"
-    choices: ["ebs", "ebs-io1", "ebs-ssd", "instance-store"]
+    required: False
+    default: None
+    choices: ['ebs', 'ebs-io1', 'ebs-ssd', 'instance-store']
   arch:
     description: CPU architecture
-    required: false
-    default: "amd64"
-    choices: ["i386", "amd64"]
-  region:
-    description: EC2 region
-    required: false
-    default: us-east-1
-    choices: ["ap-northeast-1", "ap-southeast-1", "ap-southeast-2",
-              "eu-central-1", "eu-west-1", "sa-east-1", "us-east-1",
-              "us-west-1", "us-west-2", "us-gov-west-1"]
+    required: False
+    default: None
+    choices: ['i386', 'x86_64', 'amd64']
+    aliases: ['architecture']
   virt:
-    description: virutalization type
+    description: virtualization type
+    required: False
+    default: None
+    choices: ['paravirtual', 'hvm']
+  ec2_region:
+    description: EC2 region
+    required: True
+    aliases: ['aws_region', 'ec2_region', 'region']
+  aws_secret_key:
+    description:
+      - AWS secret key. If not set then the value of the AWS_SECRET_KEY'''
+''' environment variable is used.
+    required: False
+    default: None
+    aliases: ['ec2_secret_key', 'secret_key']
+  aws_access_key:
+    description:
+      - AWS access key. If not set then the value of the AWS_ACCESS_KEY'''
+''' environment variable is used.
+    required: False
+    default: None
+    aliases: ['ec2_access_key', 'access_key']
+  validate_certs:
+    description:
+      - When set to 'no', SSL certificates will not be validated for'''
+''' boto versions >= 2.6.0.
     required: false
-    default: paravirtual
-    choices: ["paravirtual", "hvm"]
+    default: 'yes'
+    choices: ['yes', 'no']
+    aliases: []
 
 author: Lorin Hochstein
 '''
@@ -75,127 +102,174 @@ EXAMPLES = '''
   connection: local
   tasks:
   - name: Get the Ubuntu precise AMI
-    ec2_ami_search: distro=ubuntu release=precise region=us-west-1 store=instance-store
+    ec2_ami_search:
+        name='ubuntu/images*precise*'
+        owner='ubuntu'
+        region=us-west-1
+        owner=ubuntu
+        arch=x86_64
+        store=instance-store
+        virt=paravirtual
     register: ubuntu_image
   - name: Start the EC2 instance
     ec2: image={{ ubuntu_image.ami }} instance_type=m1.small key_name=mykey
+
+- name: Find AWS NAT AMI
+  hosts: 127.0.0.1
+  connection: local
+  tasks:
+  - name: Find AWS NAT AMI
+    ec2_ami_search
+      name='amzn-ami-vpc-nat*'
+      owner=amazon
+      region=us-west-1
+      arch=x86_64
+      virt=paravirtual
+    register: nat_ami
 '''
 
-import csv
-import json
-import urllib2
-import urlparse
+import sys
+import re
 
-SUPPORTED_DISTROS = ['ubuntu']
-
-AWS_REGIONS = ['ap-northeast-1',
-               'ap-southeast-1',
-               'ap-southeast-2',
-               'eu-central-1',
-               'eu-west-1',
-               'sa-east-1',
-               'us-east-1',
-               'us-west-1',
-               'us-west-2',
-               "us-gov-west-1"]
+try:
+    import boto.ec2
+    from boto.exception import EC2ResponseError, NoAuthHandlerFound
+except ImportError:
+    print "failed=True msg='boto required for this module'"
+    sys.exit(1)
 
 
-def get_url(module, url):
-    """ Get url and return response """
-    try:
-        r = urllib2.urlopen(url)
-    except (urllib2.HTTPError, urllib2.URLError), e:
-        code = getattr(e, 'code', -1)
-        module.fail_json(msg="Request failed: %s" % str(e), status_code=code)
-    return r
+def natural_sort_key(item):
+    """ For images (like Ubuntu) who use YYYYMMDD or YYYYMMDD.N,
+    this helps ensure sort order is correct to choose the latest image."""
+    def convert(text):
+        if text.isdigit():
+            return int(text)
+        return text.lower()
+    return [convert(c) for c in re.split('([0-9]+)', item)]
 
 
-def ubuntu(module):
-    """ Get the ami for ubuntu """
-
-    release = module.params['release']
-    stream = module.params['stream']
-    store = module.params['store']
-    arch = module.params['arch']
-    region = module.params['region']
-    virt = module.params['virt']
-
-    url = get_ubuntu_url(release, stream)
-
-    req = get_url(module, url)
-    reader = csv.reader(req, delimiter='\t')
-    try:
-        ami, aki, ari, tag, serial = lookup_ubuntu_ami(reader, release, stream,
-            store, arch, region, virt)
-        module.exit_json(changed=False, ami=ami, aki=aki, ari=ari, tag=tag,
-            serial=serial)
-    except KeyError:
-        module.fail_json(msg="No matching AMI found")
+def image_sort_key(image):
+    return natural_sort_key(image.name)
 
 
-def lookup_ubuntu_ami(table, release, stream, store, arch, region, virt):
-    """ Look up the Ubuntu AMI that matches query given a table of AMIs
+def search_ami(ec2_conn, name, image_ids, owner_ids, arch, store, virt,
+               filters):
 
-        table: an iterable that returns a row of
-               (release, stream, tag, serial, region, ami, aki, ari, virt)
-        release: ubuntu release name
-        stream: 'server' or 'desktop'
-        store: 'ebs', 'ebs-io1', 'ebs-ssd' or 'instance-store'
-        arch: 'i386' or 'amd64'
-        region: EC2 region
-        virt: 'paravirtual' or 'hvm'
+    if filters is None:
+        filters = {}
 
-        Returns (ami, aki, ari, tag, serial)"""
-    expected = (release, stream, store, arch, region, virt)
+    if name is not None:
+        filters['name'] = name
 
-    for row in table:
-        (actual_release, actual_stream, tag, serial,
-            actual_store, actual_arch, actual_region, ami, aki, ari,
-            actual_virt) = row
-        actual = (actual_release, actual_stream, actual_store, actual_arch,
-            actual_region, actual_virt)
-        if actual == expected:
-            # aki and ari are sometimes blank
-            if aki == '':
-                aki = None
-            if ari == '':
-                ari = None
-            return (ami, aki, ari, tag, serial)
+    filters['state'] = 'available'
+    filters['image-type'] = 'machine'
 
-    raise KeyError()
+    if store is not None:
+        if store == 'instance-store':
+            filters['root-device-type'] = 'instance-store'
+        elif store == 'ebs':
+            filters['root-device-type'] = 'ebs'
+            filters['block-device-mapping.volume-type'] = 'standard'
+        elif store == 'ebs-ssd':
+            filters['root-device-type'] = 'ebs'
+            filters['block-device-mapping.volume-type'] = 'gp2'
+        elif store == 'ebs-io1':
+            filters['root-device-type'] = 'ebs'
+            filters['block-device-mapping.volume-type'] = 'io1'
+        else:
+            raise ValueError('Invalid instance store parameter {}'
+                             .format(store))
+    if arch is not None:
+        filters['architecture'] = arch
+
+    if virt is not None:
+        filters['virtualization-type'] = virt
+
+    images = ec2_conn.get_all_images(image_ids, owner_ids, filters=filters)
+    return sorted(images, key=image_sort_key, reverse=True)
 
 
-def get_ubuntu_url(release, stream):
-    url = "https://cloud-images.ubuntu.com/query/%s/%s/released.current.txt"
-    return url % (release, stream)
+_KNOWN_OWNERS = {
+    'ubuntu': '099720109477',
+    'amazon': '137112412989',
+}
 
 
 def main():
-    arg_spec = dict(
-        distro=dict(required=True, choices=SUPPORTED_DISTROS),
-        release=dict(required=True),
-        stream=dict(required=False, default='server',
-            choices=['desktop', 'server']),
-        store=dict(required=False, default='ebs',
-            choices=['ebs', 'ebs-io1', 'ebs-ssd', 'instance-store']),
-        arch=dict(required=False, default='amd64',
-            choices=['i386', 'amd64']),
-        region=dict(required=False, default='us-east-1', choices=AWS_REGIONS),
-        virt=dict(required=False, default='paravirtual',
-            choices=['paravirtual', 'hvm'])
+    argument_spec = ec2_argument_spec()
+    argument_spec.update(dict(
+        name=dict(required=False),
+        filters=dict(required=False, type='dict'),
+        image_id=dict(required=False, type='list'),
+        owner=dict(required=False, type='list'),
+        architecture=dict(required=False, choices=['i386', 'x86_64', 'amd64'],
+                          aliases=['arch']),
+        store=dict(required=False,
+                   choices=['ebs', 'ebs-io1', 'ebs-ssd', 'instance-store']),
+        virt=dict(required=False, choices=['paravirtual', 'hvm']),
+    ))
+    module = AnsibleModule(
+        argument_spec=argument_spec,
+        supports_check_mode=True,
     )
-    module = AnsibleModule(argument_spec=arg_spec)
-    distro = module.params['distro']
 
-    if distro == 'ubuntu':
-        ubuntu(module)
-    else:
-        module.fail_json(msg="Unsupported distro: %s" % distro)
+    owner_ids = module.params.get('owner')
+    if owner_ids is not None:
+        owner_ids = [_KNOWN_OWNERS.get(o, o) for o in owner_ids]
 
+    image_ids = module.params.get('image_id')
 
+    architecture = module.params.get('architecture')
+    if architecture == 'amd64':
+        architecture = 'x86_64'
 
-# this is magic, see lib/ansible/module_common.py
-from ansible.module_utils.basic import *
+    ec2_url, aws_access_key, aws_secret_key, region = get_ec2_creds(module)
+    if not region:
+        module.fail_json(msg='Region must be specified')
+
+    try:
+        ec2_conn = boto.ec2.connect_to_region(
+            region,
+            aws_access_key_id=aws_access_key,
+            aws_secret_access_key=aws_secret_key,
+        )
+    except NoAuthHandlerFound as e:
+        module.fail_json(msg=str(e))
+
+    try:
+        images = search_ami(
+            ec2_conn,
+            name=module.params.get('name'),
+            image_ids=image_ids,
+            owner_ids=owner_ids,
+            arch=architecture,
+            store=module.params.get('store'),
+            virt=module.params.get('virt'),
+            filters=module.params.get('filters'))
+    except EC2ResponseError as e:
+        module.fail_json(msg=str(e))
+
+    if not images:
+        module.fail_json(msg='No matching AMIs found')
+
+    image = images[0]
+    module.exit_json(**{
+        'changed': False,
+        'ami': image.id,
+        'aki': image.kernel_id,
+        'ari': image.virtualization_type,
+        'image': {
+            'id': image.id,
+            'name': image.name,
+            'kernel_id': image.kernel_id,
+            'virtualization_type': image.virtualization_type,
+            'description': image.description,
+
+        }})
+
+from ansible.module_utils.basic import *  # noqa
+from ansible.module_utils.ec2 import *  # noqa
 
 if __name__ == '__main__':
     main()
