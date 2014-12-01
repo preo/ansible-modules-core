@@ -200,7 +200,7 @@ def subnet_json(vpc_conn, subnet):
     }
 
 
-class VPCException(Exception):
+class AnsibleVPCException(Exception):
     pass
 
 
@@ -215,7 +215,7 @@ def find_vpc(vpc_conn, resource_tags=None, vpc_id=None, cidr=None):
     A VPC object that matches either an ID or CIDR and one or more tag values
     """
     if vpc_id is None and (cidr is None or not resource_tags):
-        raise VPCException(
+        raise AnsibleVPCException(
             'You must specify either a vpc_id or a cidr block + list of'
             ' unique tags, aborting')
 
@@ -246,7 +246,7 @@ def find_vpc(vpc_conn, resource_tags=None, vpc_id=None, cidr=None):
     elif len(found_vpcs) == 1:
         return found_vpcs[0]
 
-    raise VPCException(
+    raise AnsibleVPCException(
         'Found more than one vpc based on the supplied criteria, aborting')
 
 
@@ -308,12 +308,13 @@ def ensure_vpc_present(vpc_conn, vpc_id, cidr_block, instance_tenancy,
                 if pending:
                     time.sleep(5)
             if wait and wait_timeout <= time.time():
-                raise VPCException(
+                raise AnsibleVPCException(
                     'Wait for vpc availability timeout on {}'
                     .format(time.asctime())
                 )
         except boto.exception.BotoServerError, e:
-            raise VPCException('{}: {}'.format(e.error_code, e.error_message))
+            raise AnsibleVPCException(
+                '{}: {}'.format(e.error_code, e.error_message))
 
     # Done with base VPC, now change to attributes and features.
 
@@ -357,7 +358,7 @@ def ensure_vpc_present(vpc_conn, vpc_id, cidr_block, instance_tenancy,
 
         for subnet_id in subnet_ids:
             if not any((s.id == subnet_id for s in current_subnets)):
-                raise VPCException(
+                raise AnsibleVPCException(
                     'Unknown subnet {0}'.format(subnet_id, e))
 
         for subnet in current_subnets:
@@ -380,7 +381,7 @@ def ensure_vpc_present(vpc_conn, vpc_id, cidr_block, instance_tenancy,
                 vpc_conn.delete_subnet(subnet.id)
                 changed = True
             except EC2ResponseError as e:
-                raise VPCException(
+                raise AnsibleVPCException(
                     'Unable to delete subnet {0}, error: {1}'
                     .format(subnet.cidr_block, e))
 
@@ -411,7 +412,7 @@ def ensure_vpc_present(vpc_conn, vpc_id, cidr_block, instance_tenancy,
                 vpc_conn.delete_route_table(route_table.id)
                 changed = True
             except EC2ResponseError, e:
-                raise VPCException(
+                raise AnsibleVPCException(
                     'Unable to delete old route table {0}, error: {1}'
                     .format(route_table.id, e))
 
@@ -478,7 +479,7 @@ def ensure_vpc_absent(vpc_conn, resource_tags, vpc_id, cidr, check_mode):
 
             vpc_conn.delete_vpc(vpc.id)
         except EC2ResponseError, e:
-            raise VPCException(
+            raise AnsibleVPCException(
                 'Unable to delete VPC {0}, error: {1}'.format(vpc.id, e)
             )
 
@@ -551,7 +552,7 @@ def main():
                 wait_timeout=wait_timeout,
                 check_mode=module.check_mode,
             )
-    except VPCException as e:
+    except AnsibleVPCException as e:
         module.fail_json(msg=str(e))
 
     module.exit_json(**result)
