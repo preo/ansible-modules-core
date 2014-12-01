@@ -204,9 +204,9 @@ def subnet_json(vpc_conn, subnet):
     Ansible JSON result.
     """
     return {
-        'resource_tags': {t.name: t.value
-                          for t in vpc_conn.get_all_tags(
-                              filters={'resource-id': subnet.id})},
+        'resource_tags': dict(((t.name, t.value)
+                               for t in vpc_conn.get_all_tags(
+                                   filters={'resource-id': subnet.id}))),
         'cidr': subnet.cidr_block,
         'az': subnet.availability_zone,
         'id': subnet.id,
@@ -245,8 +245,8 @@ def find_vpc(vpc_conn, vpc_id, vpc_name, cidr, resource_tags):
 
     if not found_vpcs and (cidr and resource_tags):
         filters = {'cidr': cidr, 'state': 'available'}
-        filters.update({'tag:{}'.format(t): v
-                        for t, v in resource_tags.iteritems()})
+        filters.update(dict((('tag:{0}'.format(t), v)
+                             for t, v in resource_tags.iteritems())))
         found_vpcs = vpc_conn.get_all_vpcs(filters=filters)
 
     if not found_vpcs:
@@ -327,19 +327,19 @@ def ensure_vpc_present(vpc_conn, vpc_id, vpc_name, cidr_block, resource_tags,
                     time.sleep(5)
             if wait and wait_timeout <= time.time():
                 raise AnsibleVPCException(
-                    'Wait for VPC availability timeout on {}'
+                    'Wait for VPC availability timeout on {0}'
                     .format(time.asctime())
                 )
         except boto.exception.BotoServerError, e:
             raise AnsibleVPCException(
-                '{}: {}'.format(e.error_code, e.error_message))
+                '{0}: {1}'.format(e.error_code, e.error_message))
 
     # Done with base VPC, now change to attributes and features.
 
     # Add resource tags
-    vpc_tags = {t.name: t.value
-                for t in vpc_conn.get_all_tags(
-                    filters={'resource-id': vpc.id})}
+    vpc_tags = dict(((t.name, t.value)
+                     for t in vpc_conn.get_all_tags(
+                         filters={'resource-id': vpc.id})))
 
     if (resource_tags and
             not set(resource_tags.items()).issubset(set(vpc_tags.items()))):
