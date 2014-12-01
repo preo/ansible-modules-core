@@ -228,20 +228,10 @@ def find_vpc(vpc_conn, resource_tags=None, vpc_id=None, cidr=None):
         found_vpcs = vpc_conn.get_all_vpcs(None, {'vpc-id': vpc_id,
                                                   'state': 'available'})
     else:
-        previous_vpcs = vpc_conn.get_all_vpcs(None, {'cidr': cidr,
-                                                     'state': 'available'})
-
-        for vpc in previous_vpcs:
-            # Get all tags for each of the found VPCs
-            vpc_tags = {t.name: t.value
-                        for t in vpc_conn.get_all_tags(
-                            filters={'resource-id': vpc.id})}
-
-            # If the supplied list of ID Tags match a subset of the VPC Tags,
-            # we found our VPC
-            if all((k in vpc_tags and vpc_tags[k] == v
-                    for k, v in resource_tags.items())):
-                found_vpcs.append(vpc)
+        filt = {'cidr': cidr, 'state': 'available'}
+        filt.update({'tag:{}'.format(t): v
+                     for t, v in resource_tags.iteritems()})
+        found_vpcs = vpc_conn.get_all_vpcs(None, filters=filt)
 
     if not found_vpcs:
         return None
