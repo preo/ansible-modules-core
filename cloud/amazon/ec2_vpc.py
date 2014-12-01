@@ -61,11 +61,11 @@ options:
   resource_tags:
     description:
       - 'A dictionary array of resource tags of the form: { tag1: value1,'''
-''' tag2: value2 }. Tags in this list are used in conjunction with CIDR block'''
-''' to uniquely identify a VPC in lieu of vpc_id. Therefore, if CIDR/Tag'''
-''' combination does not exits, a new VPC will be created.  VPC tags not on'''
-''' this list will be ignored. Prior to 1.7, specifying a resource tag was'''
-''' optional.'
+''' tag2: value2 }. Tags in this list are used in conjunction with CIDR'''
+''' block to uniquely identify a VPC in lieu of vpc_id. Therefore, if'''
+''' CIDR/Tag combination does not exits, a new VPC will be created.  VPC'''
+''' tags not on this list will be ignored. Prior to 1.7, specifying a'''
+''' resource tag was optional.'
     required: true
     default: null
     aliases: []
@@ -158,8 +158,8 @@ EXAMPLES = '''
         state: absent
         vpc_id: vpc-aaaaaaa
         region: us-west-2
-If you have added elements not managed by this module, e.g. instances, NATs, etc
-then the delete will fail until those dependencies are removed.
+If you have added elements not managed by this module, e.g. instances, NATs,
+etc. then the delete will fail until those dependencies are removed.
 '''
 
 
@@ -180,7 +180,6 @@ def vpc_json(vpc):
     Retrieves vpc information from an instance
     ID and returns it as a dictionary
     """
-
     return({
         'id': vpc.id,
         'cidr_block': vpc.cidr_block,
@@ -236,8 +235,8 @@ def find_vpc(vpc_conn, resource_tags=None, vpc_id=None, cidr=None):
                         for t in vpc_conn.get_all_tags(
                             filters={'resource-id': vpc.id})}
 
-            # If the supplied list of ID Tags match a subset of the VPC Tags, we
-            # found our VPC
+            # If the supplied list of ID Tags match a subset of the VPC Tags,
+            # we found our VPC
             if all((k in vpc_tags and vpc_tags[k] == v
                     for k, v in resource_tags.items())):
                 found_vpcs.append(vpc)
@@ -320,7 +319,8 @@ def ensure_vpc_present(vpc_conn, vpc_id, cidr_block, instance_tenancy,
 
     # Add resource tags
     vpc_tags = {t.name: t.value
-                for t in vpc_conn.get_all_tags(filters={'resource-id': vpc.id})}
+                for t in vpc_conn.get_all_tags(
+                    filters={'resource-id': vpc.id})}
 
     if (resource_tags and
             not set(resource_tags.items()).issubset(set(vpc_tags.items()))):
