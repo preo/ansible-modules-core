@@ -163,16 +163,18 @@ etc. then the delete will fail until those dependencies are removed.
 '''
 
 
-import sys
+import sys  # noqa
 import time
 
 try:
     import boto.ec2
     import boto.vpc
     from boto.exception import EC2ResponseError
+    HAS_BOTO = True
 except ImportError:
-    print "failed=True msg='boto required for this module'"
-    sys.exit(1)
+    HAS_BOTO = False
+    if __name__ != '__main__':
+        raise
 
 
 def vpc_json(vpc):
@@ -507,6 +509,8 @@ def main():
         argument_spec=argument_spec,
         supports_check_mode=True,
     )
+    if not HAS_BOTO:
+        module.fail_json(msg='boto is required for this module')
 
     vpc_id = module.params.get('vpc_id')
     cidr_block = module.params.get('cidr_block')
