@@ -54,7 +54,14 @@ options:
     aliases: []
   vpc_id:
     description:
-      - A VPC id to terminate when state=absent
+      - A VPC id to terminate when state=absent or to update
+    required: false
+    default: null
+    aliases: []
+  vpc_name:
+    description:
+      - Match or create VPC by this tag 'Name' value, rather than by vpc_id.'''
+''' If vpc_id is supplied, the VPC's tag name will be updated to match.
     required: false
     default: null
     aliases: []
@@ -206,32 +213,34 @@ class AnsibleVPCException(Exception):
     pass
 
 
-def find_vpc(vpc_conn, resource_tags=None, vpc_id=None, cidr=None):
+def find_vpc(vpc_conn, vpc_id, vpc_name, cidr, resource_tags):
     """
-    Finds a VPC that matches a specific id or cidr + tags
+    Finds a VPC that matches a specific id, name, or cidr + tags
 
     module : AnsibleModule object
     vpc_conn: authenticated VPCConnection connection object
 
     Returns:
-    A VPC object that matches either an ID or CIDR and one or more tag values
+    A VPC object that matches based on the search parameters
     """
-    if vpc_id is None and (cidr is None or not resource_tags):
+    if not vpc_id and not vpc_name and not (cidr and resource_tags):
         raise AnsibleVPCException(
-            'You must specify either a vpc_id or a cidr block + list of'
-            ' unique tags, aborting')
+            'You must specify either a vpc_id, vpc_name, or a cidr block +'
+            ' list of unique tags, aborting')
 
     found_vpcs = []
 
-    # Check for existing VPC by cidr_block or id
-    if vpc_id is not None:
-        found_vpcs = vpc_conn.get_all_vpcs(None, {'vpc-id': vpc_id,
-                                                  'state': 'available'})
-    else:
-        filt = {'cidr': cidr, 'state': 'available'}
-        filt.update({'tag:{}'.format(t): v
-                     for t, v in resource_tags.iteritems()})
-        found_vpcs = vpc_conn.get_all_vpcs(None, filters=filt)
+    if not found_vpcs and vpc_id:
+        found_vpcs = vpc_conn.get_all_vpcs(filters={'vpc-id': vpc_id,
+                                                    'state': 'available'})
+    if not found_vpcs and vpc_name:
+        found_vpcs = vpc_conn.get_all_vpcs(filters={'tag:Name': vpc_name})
+
+    if not found_vpcs and (cidr and resource_tags):
+        filters = {'cidr': cidr, 'state': 'available'}
+        filters.update({'tag:{}'.format(t): v
+                        for t, v in resource_tags.iteritems()})
+        found_vpcs = vpc_conn.get_all_vpcs(filters=filters)
 
     if not found_vpcs:
         return None
@@ -251,10 +260,10 @@ def route_table_is_main(route_table):
     return False
 
 
-def ensure_vpc_present(vpc_conn, vpc_id, cidr_block, instance_tenancy,
-                       dns_support, dns_hostnames, subnet_ids,
-                       route_table_ids, resource_tags, wait, wait_timeout,
-                       check_mode):
+def ensure_vpc_present(vpc_conn, vpc_id, vpc_name, cidr_block, resource_tags,
+                       instance_tenancy, dns_support, dns_hostnames,
+                       subnet_ids, route_table_ids, wait,
+                       wait_timeout, check_mode):
     """
     Creates a new or modifies an existing VPC.
 
@@ -268,7 +277,14 @@ def ensure_vpc_present(vpc_conn, vpc_id, cidr_block, instance_tenancy,
     changed = False
 
     # Check for existing VPC by cidr_block + tags or id
-    vpc = find_vpc(vpc_conn, resource_tags, vpc_id, cidr_block)
+    vpc = find_vpc(vpc_conn, vpc_id, vpc_name, cidr_block, resource_tags)
+
+    # Make sure Name tag is updated to vpc_name, if it's given and not
+    # overridden in resource_tags.
+    if vpc_name:
+        if resource_tags is None:
+            resource_tags = {}
+        resource_tags.setdefault('Name', vpc_name)
 
     if vpc is None:
         if check_mode:
@@ -416,7 +432,8 @@ def ensure_vpc_present(vpc_conn, vpc_id, cidr_block, instance_tenancy,
     }
 
 
-def ensure_vpc_absent(vpc_conn, resource_tags, vpc_id, cidr, check_mode):
+def ensure_vpc_absent(vpc_conn, vpc_id, vpc_name, cidr, resource_tags,
+                      check_mode):
     """
     Terminates a VPC
 
@@ -430,10 +447,9 @@ def ensure_vpc_absent(vpc_conn, resource_tags, vpc_id, cidr, check_mode):
 
     If the VPC to be terminated is available
     "changed" will be set to True.
-
     """
 
-    vpc = find_vpc(vpc_conn, resource_tags, vpc_id, cidr)
+    vpc = find_vpc(vpc_conn, vpc_id, vpc_name, cidr_block, resource_tags)
 
     changed = False
     if check_mode:
@@ -482,6 +498,7 @@ def main():
     argument_spec = ec2_argument_spec()
     argument_spec.update(dict(
         vpc_id=dict(required=False),
+        vpc_name=dict(required=False),
         cidr_block=dict(required=False),
         resource_tags=dict(type='dict', required=False),
         instance_tenancy=dict(choices=['default', 'dedicated'],
@@ -503,6 +520,7 @@ def main():
         module.fail_json(msg='boto is required for this module')
 
     vpc_id = module.params.get('vpc_id')
+    vpc_name = module.params.get('vpc_name')
     cidr_block = module.params.get('cidr_block')
     instance_tenancy = module.params.get('instance_tenancy')
     dns_support = module.params.get('dns_support')
@@ -530,18 +548,24 @@ def main():
     try:
         if module.params.get('state') == 'absent':
             result = ensure_vpc_absent(
-                vpc_conn, resource_tags, vpc_id, cidr_block, module.check_mode)
+                vpc_conn=vpc_conn,
+                vpc_id=vpc_id,
+                vpc_name=vpc_name,
+                cidr_block=cidr_block,
+                resource_tags=resource_tags,
+                check_mode=module.check_mode)
         elif state == 'present':
             result = ensure_vpc_present(
                 vpc_conn=vpc_conn,
                 vpc_id=vpc_id,
+                vpc_name=vpc_name,
                 cidr_block=cidr_block,
+                resource_tags=resource_tags,
                 instance_tenancy=instance_tenancy,
                 dns_support=dns_support,
                 dns_hostnames=dns_hostnames,
                 subnet_ids=subnet_ids,
                 route_table_ids=route_table_ids,
-                resource_tags=resource_tags,
                 wait=wait,
                 wait_timeout=wait_timeout,
                 check_mode=module.check_mode,
