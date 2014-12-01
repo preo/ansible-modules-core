@@ -186,8 +186,8 @@ except ImportError:
 
 def vpc_json(vpc):
     """
-    Retrieves vpc information from an instance
-    ID and returns it as a dictionary
+    Serializes the boto VPC object into a dictionary suitable for use as an
+    Ansible JSON result.
     """
     return({
         'id': vpc.id,
@@ -199,6 +199,10 @@ def vpc_json(vpc):
 
 
 def subnet_json(vpc_conn, subnet):
+    """
+    Serializes the boto subnet object into a dictionary suitable for use as an
+    Ansible JSON result.
+    """
     return {
         'resource_tags': {t.name: t.value
                           for t in vpc_conn.get_all_tags(
@@ -217,8 +221,11 @@ def find_vpc(vpc_conn, vpc_id, vpc_name, cidr, resource_tags):
     """
     Finds a VPC that matches a specific id, name, or cidr + tags
 
-    module : AnsibleModule object
-    vpc_conn: authenticated VPCConnection connection object
+    vpc_conn: Authenticated VPCConnection connection object
+    vpc_id: The exact ID of the VPC
+    vpc_name: The value of a VPC 'Name' tag to search
+    cidr_block: The CIDR block VPCs whose tags to search
+    resource_tags: A dict of tags to match against when used with `cidr_block`
 
     Returns:
     A VPC object that matches based on the search parameters
@@ -248,7 +255,7 @@ def find_vpc(vpc_conn, vpc_id, vpc_name, cidr, resource_tags):
         return found_vpcs[0]
 
     raise AnsibleVPCException(
-        'Found more than one vpc based on the supplied criteria, aborting')
+        'Found more than one VPC based on the supplied criteria, aborting')
 
 
 def route_table_is_main(route_table):
@@ -265,14 +272,17 @@ def ensure_vpc_present(vpc_conn, vpc_id, vpc_name, cidr_block, resource_tags,
                        subnet_ids, route_table_ids, wait,
                        wait_timeout, check_mode):
     """
-    Creates a new or modifies an existing VPC.
+    Creates a new VPC or modifies an existing one.
 
-    module : AnsibleModule object
-    vpc_conn: authenticated VPCConnection connection object
+    vpc_conn: Authenticated VPCConnection connection object
+    vpc_id: The exact ID of the VPC
+    vpc_name: The value of a VPC 'Name' tag to search
+    cidr_block: The CIDR block VPCs whose tags to search
+    resource_tags: A dict of tags to match against and to update
 
     Returns:
-        A dictionary with information
-        about the VPC and subnets that were launched
+        A dictionary with information about the VPC and subnets that were
+        launched or modified.
     """
     changed = False
 
@@ -317,7 +327,7 @@ def ensure_vpc_present(vpc_conn, vpc_id, vpc_name, cidr_block, resource_tags,
                     time.sleep(5)
             if wait and wait_timeout <= time.time():
                 raise AnsibleVPCException(
-                    'Wait for vpc availability timeout on {}'
+                    'Wait for VPC availability timeout on {}'
                     .format(time.asctime())
                 )
         except boto.exception.BotoServerError, e:
@@ -435,18 +445,15 @@ def ensure_vpc_present(vpc_conn, vpc_id, vpc_name, cidr_block, resource_tags,
 def ensure_vpc_absent(vpc_conn, vpc_id, vpc_name, cidr, resource_tags,
                       check_mode):
     """
-    Terminates a VPC
+    Terminates a VPC.
+    vpc_conn: Authenticated VPCConnection connection object
+    vpc_id: The exact ID of the VPC
+    vpc_name: The value of a VPC 'Name' tag to search
+    cidr_block: The CIDR block VPCs whose tags to search
+    resource_tags: A dict of tags to match against and to update
 
-    module: Ansible module object
-    vpc_conn: authenticated VPCConnection connection object
-    vpc_id: a vpc id to terminate
-    cidr: The cidr block of the VPC - can be used in lieu of an ID
-
-    Returns a dictionary of VPC information
-    about the VPC terminated.
-
-    If the VPC to be terminated is available
-    "changed" will be set to True.
+    Returns:
+        A dictionary with information about the VPC that was terminated.
     """
 
     vpc = find_vpc(vpc_conn, vpc_id, vpc_name, cidr_block, resource_tags)
