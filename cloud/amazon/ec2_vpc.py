@@ -360,25 +360,16 @@ def ensure_vpc_present(vpc_conn, vpc_id, vpc_name, cidr_block, resource_tags,
                 new_tags[key] = value
 
         if new_tags:
-            if check_mode:
-                return {
-                    'changed': True,
-                    'vpc_id': vpc.id,
-                    'vpc': vpc_json(vpc),
-                    'subnets': []
-                }
-
-            vpc_conn.create_tags(vpc.id, new_tags)
+            vpc_conn.create_tags(vpc.id, new_tags, dry_run=check_mode)
             changed = True
 
     # boto doesn't appear to have a way to determine the existing
     # value of the dns attributes, so we just set them.
     # It also must be done one at a time.
-    if not check_mode:
-        vpc_conn.modify_vpc_attribute(vpc.id,
-                                      enable_dns_support=dns_support)
-        vpc_conn.modify_vpc_attribute(vpc.id,
-                                      enable_dns_hostnames=dns_hostnames)
+    vpc_conn.modify_vpc_attribute(
+        vpc.id, enable_dns_support=dns_support, dry_run=check_mode)
+    vpc_conn.modify_vpc_attribute(
+        vpc.id, enable_dns_hostnames=dns_hostnames, dry_run=check_mode)
 
     # Process all subnet properties
     if subnet_ids is not None:
@@ -393,29 +384,13 @@ def ensure_vpc_present(vpc_conn, vpc_id, vpc_name, cidr_block, resource_tags,
             if subnet.id in subnet_ids:
                 continue
 
-            if check_mode:
-                return {
-                    'changed': True,
-                    'vpc_id': vpc.id,
-                    'vpc': vpc_json(vpc),
-                    'subnets': [
-                        subnet_json(vpc_conn, s)
-                        for s in current_subnets
-                        if s.id in subnet_ids
-                    ]
-                }
-
             try:
-                vpc_conn.delete_subnet(subnet.id)
+                vpc_conn.delete_subnet(subnet.id, dry_run=check_mode)
                 changed = True
             except EC2ResponseError as e:
                 raise AnsibleVPCException(
                     'Unable to delete subnet {0}, error: {1}'
                     .format(subnet.cidr_block, e))
-
-    json_subnets = [subnet_json(vpc_conn, s)
-                    for s in vpc_conn.get_all_subnets(
-                        filters={'vpc_id': vpc.id})]
 
     if route_table_ids is not None:
         # old ones except the 'main' route table as boto can't set the main
@@ -428,16 +403,8 @@ def ensure_vpc_present(vpc_conn, vpc_id, vpc_name, cidr_block, resource_tags,
                     or route_table_is_main(route_table)):
                 continue
 
-            if check_mode:
-                return {
-                    'changed': True,
-                    'vpc_id': vpc.id,
-                    'vpc': vpc_json(vpc),
-                    'subnets': json_subnets,
-                }
-
             try:
-                vpc_conn.delete_route_table(route_table.id)
+                vpc_conn.delete_route_table(route_table.id, dry_run=check_mode)
                 changed = True
             except EC2ResponseError, e:
                 raise AnsibleVPCException(
@@ -448,7 +415,7 @@ def ensure_vpc_present(vpc_conn, vpc_id, vpc_name, cidr_block, resource_tags,
         'changed': changed,
         'vpc_id': vpc.id,
         'vpc': vpc_json(vpc),
-        'subnets': json_subnets,
+        'subnets': [subnet_json(vpc_conn, s) for s in listed_subnets],
     }
 
 
