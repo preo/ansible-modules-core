@@ -45,10 +45,11 @@ options:
     required: false
     default: "yes"
     choices: [ "yes", "no" ]
-  subnet_ids:
+  subnets:
     description:
-      - 'A list of subnet IDs to keep on the VPC. If this argument is'''
-''' supplied, only those subnets listed will be kept; others will be removed.'
+      - 'A list of subnet IDs, Name tags, or CIDRs to keep on the VPC. If'''
+''' this argument is supplied, only those subnets listed will be kept;'''
+''' others will be removed.'
     required: false
     default: null
     aliases: []
@@ -77,10 +78,11 @@ options:
     default: null
     aliases: []
     version_added: "1.6"
-  route_table_ids:
+  route_tables:
     description:
-      - 'A list of route table IDs to keep on the VPC. If this argument is'''
-''' supplied, only those tables listed will be kept; others will be removed.'
+      - 'A list of route table IDs or Name tags to keep on the VPC. If this'''
+''' argument is supplied, only those tables listed will be kept; others will'''
+''' be removed.'
     required: false
     default: null
     aliases: []
@@ -153,12 +155,13 @@ EXAMPLES = '''
       local_action:
         module: ec2_vpc
         vpc_id: {{vpc.vpc_id}}
-        subnet_ids:
+        subnets:
           - {{private_subnet.subnet_id}}
-          - {{public_subnet.subnet_id}}
-        route_table_ids:
+          - 'Database Subnet'
+          - '10.0.0.0/8'
+        route_tables:
           - {{public_route_table.route_table_id}}
-          - {{nat_route_table.route_table_id}}
+          - 'NAT Route Table'
 
 # Removal of a VPC by id
       ec2_vpc:
@@ -172,6 +175,7 @@ etc. then the delete will fail until those dependencies are removed.
 
 import sys  # noqa
 import time
+import re
 
 try:
     import boto.ec2
@@ -215,6 +219,108 @@ def subnet_json(vpc_conn, subnet):
 
 class AnsibleVPCException(Exception):
     pass
+
+
+class AnsibleSubnetSearchException(AnsibleVPCException):
+    pass
+
+
+CIDR_RE = re.compile('^(\d{1,3}\.){3}\d{1,3}\/\d{1,2}$')
+SUBNET_RE = re.compile('^subnet-[A-z0-9]+$')
+ROUTE_TABLE_RE = re.compile('^rtb-[A-z0-9]+$')
+
+
+def find_subnets(vpc_conn, vpc_id, identified_subnets):
+    """
+    Finds a list of subnets, each identified either by a raw ID, a unique
+    'Name' tag, or a CIDR such as 10.0.0.0/8.
+
+    Note that this function is duplicated in other ec2 modules, and should
+    potentially be moved into potentially be moved into a shared module_utils
+    """
+    subnet_ids = []
+    subnet_names = []
+    subnet_cidrs = []
+    for subnet in (identified_subnets or []):
+        if re.match(SUBNET_RE, subnet):
+            subnet_ids.append(subnet)
+        elif re.match(CIDR_RE, subnet):
+            subnet_cidrs.append(subnet)
+        else:
+            subnet_names.append(subnet)
+
+    subnets_by_id = []
+    if subnet_ids:
+        subnets_by_id = vpc_conn.get_all_subnets(
+            subnet_ids, filters={'vpc_id': vpc_id})
+
+        for subnet_id in subnet_ids:
+            if not any(s.id == subnet_id for s in subnets_by_id):
+                raise AnsibleVPCException('Subnet ID "{0}" does not exist'
+                                          .format(subnet_id))
+
+    subnets_by_cidr = []
+    if subnet_cidrs:
+        subnets_by_cidr = vpc_conn.get_all_subnets(
+            filters={'vpc_id': vpc_id, 'cidr': subnet_cidrs})
+
+        for cidr in subnet_cidrs:
+            if not any(s.cidr_block == cidr for s in subnets_by_cidr):
+                raise AnsibleVPCException('Subnet CIDR "{0}" does not exist'
+                                          .format(subnet_cidr))
+
+    subnets_by_name = []
+    if subnet_names:
+        subnets_by_name = vpc_conn.get_all_subnets(
+            filters={'vpc_id': vpc_id, 'tag:Name': subnet_names})
+
+        for name in subnet_names:
+            matching = [s.tags.get('Name') == name for s in subnets_by_name]
+            if len(matching) == 0:
+                raise AnsibleVPCException('Subnet named "{0}" does not exist'
+                                          .format(name))
+            elif len(matching) > 1:
+                raise AnsibleVPCException('Multiple subnets named "{0}"'
+                                          .format(name))
+
+    return subnets_by_id + subnets_by_cidr + subnets_by_name
+
+
+def find_route_tables(vpc_conn, vpc_id, identified_route_tables):
+    rt_ids = []
+    rt_names = []
+    for rt in (identified_route_tables or []):
+        if re.match(ROUTE_TABLE_RE, rt):
+            rt_ids.append(rt)
+        else:
+            rt_names.append(rt)
+
+    route_tables_by_id = []
+    if rt_ids:
+        route_tables_by_id = vpc_conn.get_all_route_tables(
+            rt_ids, filters={'vpc_id': vpc_id})
+
+        for rt_id in rt_ids:
+            if not any(rt.id == rt_id for rt in route_tables_by_id):
+                raise AnsibleVPCException(
+                    'Route table ID "{0}" does not exist'.format(rt_id))
+
+    route_tables_by_name = []
+    if rt_names:
+        route_tables_by_name = vpc_conn.get_all_subnets(
+            filters={'vpc_id': vpc_id, 'tag:Name': rt_names})
+
+        for name in rt_names:
+            matching = [rt.tags.get('Name') == name
+                        for s in route_tables_by_name]
+            if len(matching) == 0:
+                raise AnsibleVPCException(
+                    'Route table named "{0}" does not exist'.format(name))
+            elif len(matching) > 1:
+                raise AnsibleVPCException(
+                    'Multiple route tables name "{0}"'.format(name))
+
+    return route_tables_by_id + route_tables_by_name
 
 
 def find_vpc(vpc_conn, vpc_id, vpc_name, cidr, resource_tags):
@@ -279,7 +385,7 @@ def route_table_is_main(route_table):
 
 def ensure_vpc_present(vpc_conn, vpc_id, vpc_name, cidr_block, resource_tags,
                        instance_tenancy, dns_support, dns_hostnames,
-                       subnet_ids, route_table_ids, wait,
+                       subnets, route_tables, wait,
                        wait_timeout, check_mode):
     """
     Creates a new VPC or modifies an existing one.
@@ -372,16 +478,18 @@ def ensure_vpc_present(vpc_conn, vpc_id, vpc_name, cidr_block, resource_tags,
         vpc.id, enable_dns_hostnames=dns_hostnames, dry_run=check_mode)
 
     # Process all subnet properties
-    if subnet_ids is not None:
+    listed_subnets = []
+    if subnets is not None:
+        listed_subnets = find_subnets(vpc_conn, vpc_id, subnets)
         current_subnets = vpc_conn.get_all_subnets(filters={'vpc_id': vpc.id})
 
-        for subnet_id in subnet_ids:
-            if not any((s.id == subnet_id for s in current_subnets)):
+        for subnet in listed_subnets:
+            if not any(subnet.id == s.id for s in current_subnets):
                 raise AnsibleVPCException(
                     'Unknown subnet {0}'.format(subnet_id, e))
 
         for subnet in current_subnets:
-            if subnet.id in subnet_ids:
+            if any(subnet.id == s.id for s in listed_subnets):
                 continue
 
             try:
@@ -392,14 +500,16 @@ def ensure_vpc_present(vpc_conn, vpc_id, vpc_name, cidr_block, resource_tags,
                     'Unable to delete subnet {0}, error: {1}'
                     .format(subnet.cidr_block, e))
 
-    if route_table_ids is not None:
+    listed_route_tables = []
+    if route_tables is not None:
+        listed_route_tables = find_route_tables(vpc_conn, vpc_id, route_tables)
         # old ones except the 'main' route table as boto can't set the main
         # table yet.
         current_route_tables = vpc_conn.get_all_route_tables(
             filters={'vpc-id': vpc.id})
 
         for route_table in current_route_tables:
-            if (route_table.id in route_table_ids
+            if (any(route_table.id == rt.id for rt in listed_route_tables)
                     or route_table_is_main(route_table)):
                 continue
 
@@ -491,8 +601,8 @@ def main():
         wait_timeout=dict(type='int', default=300),
         dns_support=dict(type='bool', default=True),
         dns_hostnames=dict(type='bool', default=True),
-        subnet_ids=dict(type='list', required=False),
-        route_table_ids=dict(type='list', required=False),
+        subnets=dict(type='list', required=False),
+        route_tables=dict(type='list', required=False),
         state=dict(choices=['present', 'absent'], default='present'),
     ))
 
@@ -509,8 +619,8 @@ def main():
     instance_tenancy = module.params.get('instance_tenancy')
     dns_support = module.params.get('dns_support')
     dns_hostnames = module.params.get('dns_hostnames')
-    subnet_ids = module.params.get('subnet_ids')
-    route_table_ids = module.params.get('route_table_ids')
+    subnets = module.params.get('subnets')
+    route_tables = module.params.get('route_tables')
     resource_tags = module.params.get('resource_tags')
     wait = module.params.get('wait')
     wait_timeout = module.params.get('wait_timeout')
@@ -548,8 +658,8 @@ def main():
                 instance_tenancy=instance_tenancy,
                 dns_support=dns_support,
                 dns_hostnames=dns_hostnames,
-                subnet_ids=subnet_ids,
-                route_table_ids=route_table_ids,
+                subnets=subnets,
+                route_tables=route_tables,
                 wait=wait,
                 wait_timeout=wait_timeout,
                 check_mode=module.check_mode,
