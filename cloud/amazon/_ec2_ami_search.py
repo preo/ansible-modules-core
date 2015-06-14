@@ -234,7 +234,7 @@ def main():
             aws_access_key_id=aws_access_key,
             aws_secret_access_key=aws_secret_key,
         )
-    except NoAuthHandlerFound as e:
+    except NoAuthHandlerFound, e:
         module.fail_json(msg=str(e))
 
     try:
@@ -247,7 +247,7 @@ def main():
             store=module.params.get('store'),
             virt=module.params.get('virt'),
             filters=module.params.get('filters'))
-    except EC2ResponseError as e:
+    except EC2ResponseError, e:
         module.fail_json(msg=str(e))
 
     if not images:
